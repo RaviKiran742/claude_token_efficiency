@@ -1,1 +1,1 @@
-export {};
+export { FakeEmbeddingAdapter } from './fake.js';
