@@ -1,0 +1,8 @@
+{
+  "name": "test-integration",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cc-optimize/core": "*"
+  }
+}

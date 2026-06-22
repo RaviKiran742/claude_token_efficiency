@@ -1,125 +1,7 @@
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdirSync, rmSync, writeFileSync, statSync } from 'node:fs';
-
-// ---------------------------------------------------------------------------
-// Stateful in-memory mock for better-sqlite3
-// ---------------------------------------------------------------------------
-// The native binding cannot be loaded on this machine (no VS Build Tools),
-// so we mock the entire module.  The mock stores rows in Maps keyed by
-// primary key so that INSERT OR REPLACE works correctly.
-// ---------------------------------------------------------------------------
-
-const _rows: Record<string, Map<string, Record<string, unknown>>> = {
-  files:   new Map(),
-  nodes:   new Map(),
-  edges:   new Map(),
-  vectors: new Map(),
-};
-
-const _reset = () => {
-  for (const m of Object.values(_rows)) m.clear();
-};
-
-vi.mock('better-sqlite3', () => {
-  return {
-    default: vi.fn(() => {
-      const db = {
-        pragma: vi.fn(),
-        exec:    vi.fn((_sql: string) => { _reset(); }),
-        close:   vi.fn(),
-        prepare: vi.fn((sql: string) => {
-          const isInsert = (t: string) => sql.includes(`INSERT OR REPLACE INTO ${t}`);
-          const isSelectFrom = (t: string) => /^SELECT\b/.test(sql.trim()) && sql.includes(` FROM ${t}`);
-
-          // -- run -----------------------------------------------------------------
-          const run = (...args: unknown[]) => {
-            if (isInsert('files')) {
-              const r = args[0] as Record<string, unknown>;
-              _rows.files.set(r.id as string, { id: r.id, path: r.path, mtime: r.mtime, ast_hash: r.astHash });
-            } else if (isInsert('nodes')) {
-              const r = args[0] as Record<string, unknown>;
-              _rows.nodes.set(r.id as string, {
-                id: r.id, type: r.type, file_id: r.fileId,
-                start_line: r.startLine, end_line: r.endLine,
-                name: r.name, parent_id: r.parentId, body: r.body,
-              });
-            } else if (isInsert('edges')) {
-              const r = args[0] as Record<string, unknown>;
-              const k = `${r.source}|${r.target}|${r.type}`;
-              _rows.edges.set(k, { source: r.source, target: r.target, type: r.type, weight: r.weight });
-            } else if (isInsert('vectors')) {
-              _rows.vectors.set(args[0] as string, { node_id: args[0], embedding: args[1] });
-            }
-          };
-
-          // -- get -----------------------------------------------------------------
-          const get = () => {
-            if (sql.includes('COUNT(*)') && sql.includes(' FROM files'))  return { cnt: _rows.files.size };
-            if (sql.includes('COUNT(*)') && sql.includes(' FROM nodes'))  return { cnt: _rows.nodes.size };
-            if (sql.includes('COUNT(*)') && sql.includes(' FROM edges'))  return { cnt: _rows.edges.size };
-            if (sql.includes('MAX(mtime)') && sql.includes(' FROM files')) {
-              let mt: number | null = null;
-              for (const f of _rows.files.values()) {
-                const v = f.mtime as number;
-                if (mt === null || v > mt) mt = v;
-              }
-              return { mt };
-            }
-            // hasStaleFiles: SELECT path, mtime FROM files
-            if (sql.includes('path, mtime') && sql.includes(' FROM files')) {
-              const first = _rows.files.values().next().value;
-              return first ? { path: first.path, mtime: first.mtime } : null;
-            }
-            return null;
-          };
-
-          // -- all ----------------------------------------------------------------
-          const all = () => {
-            if (isSelectFrom('files')) {
-              return Array.from(_rows.files.values()).map(f => ({
-                id: f.id, path: f.path, mtime: f.mtime,
-                astHash: f.ast_hash as string,
-              }));
-            }
-            if (isSelectFrom('nodes')) {
-              return Array.from(_rows.nodes.values()).map(n => ({
-                id: n.id, type: n.type,
-                fileId:     n.file_id as string,
-                startLine:  n.start_line as number,
-                endLine:    n.end_line as number,
-                name:       n.name as string | null,
-                parentId:   n.parent_id as string | null,
-                body:       n.body as string,
-              }));
-            }
-            if (isSelectFrom('edges')) {
-              return Array.from(_rows.edges.values());
-            }
-            if (isSelectFrom('vectors')) {
-              return Array.from(_rows.vectors.values());
-            }
-            // hasStaleFiles: SELECT path, mtime FROM files
-            if (sql.includes('path, mtime') && sql.includes(' FROM files')) {
-              return Array.from(_rows.files.values()).map(f => ({
-                path: f.path as string,
-                mtime: f.mtime as number,
-              }));
-            }
-            return [];
-          };
-
-          return { run, get, all };
-        }),
-        transaction: vi.fn(<T extends (...a: unknown[]) => unknown>(fn: T): T => fn),
-      };
-      return db;
-    }),
-  };
-});
-
-// Must import Store AFTER the mock is set up
 import { Store } from '../index.js';
 
 function tmpStore(): { store: Store; dbPath: string } {
@@ -134,7 +16,6 @@ describe('Store', () => {
   let dbDir: string;
 
   beforeEach(() => {
-    _reset();
     const s = tmpStore();
     store = s.store;
     dbDir = s.dbPath;
