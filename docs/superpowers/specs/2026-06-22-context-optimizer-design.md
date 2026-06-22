@@ -15,7 +15,7 @@ A CLI tool that builds a smart retrieval index over a TypeScript/JavaScript code
 
 ## Architecture
 
-Two packages in a single npm workspace:
+Three packages in a single npm workspace:
 
 ```
 context-optimizer/
@@ -27,15 +27,18 @@ context-optimizer/
 │   │       ├── embeddings/ # OpenAI + Ollama adapters
 │   │       ├── store/      # SQLite + sqlite-vec persistence
 │   │       └── retrieval/  # query → ranked node list
-│   └── cli/                # thin CLI layer, calls core
+│   ├── cli/                # thin CLI layer, calls core
+│   │   └── src/
+│   │       └── commands/   # build, rebuild, query, status, mcp
+│   └── mcp/                # MCP server, calls core
 │       └── src/
-│           └── commands/   # build, rebuild, query, status
+│           └── server.ts   # exposes retrieve_context tool
 ├── package.json            # npm workspaces root
 └── docs/
     └── superpowers/specs/
 ```
 
-**Tech stack:** TypeScript, Node.js, tree-sitter, ts-morph, SQLite, sqlite-vec, OpenAI embeddings (default), Ollama (adapter).
+**Tech stack:** TypeScript, Node.js, tree-sitter, ts-morph, SQLite, sqlite-vec, OpenAI embeddings (default), Ollama (adapter), `@modelcontextprotocol/sdk`.
 
 ---
 
@@ -82,7 +85,8 @@ CREATE TABLE files (
 );
 
 CREATE TABLE nodes (
-  id         TEXT PRIMARY KEY,  -- "<file_path>::<function_name>::<block_index>"
+  id         TEXT PRIMARY KEY,  -- functions: "<file_path>::<function_name>"
+                                --    blocks: "<file_path>::<function_name>::<block_index>"
   type       TEXT NOT NULL,     -- "function" | "block"
   file_id    TEXT NOT NULL REFERENCES files(id),
   start_line INTEGER NOT NULL,
@@ -103,7 +107,7 @@ CREATE TABLE edges (
 
 ### Vector index (`vectors.db`)
 
-sqlite-vec table: `node_id TEXT`, `embedding FLOAT[1536]` (text-embedding-3-small dimensions).
+sqlite-vec table: `node_id TEXT`, `embedding FLOAT[N]` where N is adapter-dependent: 1536 for OpenAI `text-embedding-3-small`, 768 for Ollama `nomic-embed-text`. The dimension is recorded in the config snapshot and must match the adapter in use; switching adapters requires a full rebuild.
 
 ### Edge types and weights
 
@@ -142,6 +146,8 @@ E_final = (1 - α) * E_semantic + α * (A_normalized * E_semantic)
 score_fusion = 0.6 * semantic_score + 0.4 * graph_proximity_to_cursor
 ```
 
+`graph_proximity_to_cursor` = `1 / (1 + bfs_distance)` where `bfs_distance` is the number of hops in the weighted graph from the candidate node to the cursor-anchored node (using edges with weight ≥ 0.5 only). Nodes unreachable from the cursor anchor get a proximity score of 0.
+
 If no cursor provided: `score_fusion = semantic_score`
 
 **Token budget:** Estimated as `(end_line - start_line) * 5` per node. Nodes added greedily by score until budget exhausted. Default: 8000 tokens.
@@ -173,6 +179,53 @@ cc-optimize status
 - `json`: array of `{ file, start, end, name, score }`
 
 **Staleness warning:** On query, if any tracked file's mtime has changed since last build, emit a non-blocking warning and proceed.
+
+---
+
+## MCP Server
+
+The MCP server exposes a single tool to Claude Code:
+
+**Tool: `retrieve_context`**
+
+```json
+{
+  "name": "retrieve_context",
+  "description": "Retrieve the most relevant code regions for a given task from the indexed codebase.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "task":   { "type": "string", "description": "Natural language task description" },
+      "file":   { "type": "string", "description": "Current file path (optional, biases retrieval)" },
+      "line":   { "type": "number", "description": "Current line number (optional, biases retrieval)" },
+      "tokens": { "type": "number", "description": "Token budget (default: 8000)" },
+      "format": { "type": "string", "enum": ["context", "manifest", "json"], "default": "context" }
+    },
+    "required": ["task"]
+  }
+}
+```
+
+**Starting the server:**
+
+```bash
+cc-optimize mcp        # stdio transport (default, used by Claude Code)
+```
+
+**Claude Code configuration (`.claude/mcp.json` at repo root):**
+
+```json
+{
+  "servers": {
+    "context-optimizer": {
+      "command": "cc-optimize",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Behaviour:** The MCP server is stateless between calls — each `retrieve_context` invocation opens the SQLite index, runs the query pipeline, and returns results. No persistent process state. The index must be built first (`cc-optimize build`); if no index exists, the tool returns a clear error message rather than failing silently.
 
 ---
 
@@ -219,6 +272,9 @@ Ollama adapter selected by setting `"provider": "ollama"` and `"model": "nomic-e
 
 **CLI smoke tests** (`packages/cli`):
 - Run each command against fixture repo, assert output shape and exit code
+
+**MCP server tests** (`packages/mcp`):
+- Start server in-process, call `retrieve_context` with fixture repo index, assert response shape and that labeled nodes appear in results
 
 **Fixture repo** (`test/fixtures/sample-repo/`): ~10 synthetic TypeScript files, ~20 functions, known call relationships. Ground truth labels for 3 sample queries — labeled nodes must appear in top-5 results.
 
