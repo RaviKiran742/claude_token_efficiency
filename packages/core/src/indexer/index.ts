@@ -59,8 +59,7 @@ export class Indexer {
       cwd: rootPath,
       ignore: ['node_modules/**', 'dist/**'],
       absolute: false,
-      withFileTypes: false,
-    });
+    } as fg.Options);
 
     const files: FileNode[] = [];
     for (const entry of entries as unknown as string[]) {
