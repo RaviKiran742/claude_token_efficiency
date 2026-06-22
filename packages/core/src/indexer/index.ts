@@ -1,11 +1,11 @@
-import { readFileSync, statSync, existsSync } from 'node:fs';
-import { resolve, relative, dirname } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import fg from 'fast-glob';
 import { createHash } from 'node:crypto';
 import { minimatch } from 'minimatch';
 import Parser from 'tree-sitter';
 import TypeScript from 'tree-sitter-typescript';
-import { CcOptimizeConfig, CodeNode, FileNode, GraphEdge, EdgeType } from '../types.js';
+import { CcOptimizeConfig, CodeNode, FileNode, GraphEdge } from '../types.js';
 
 function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -26,6 +26,7 @@ interface RawNode {
   parentId: string | null;
   body: string;
   fileContent: string; // for ts-morph call resolution
+  astNode?: Parser.SyntaxNode;
 }
 
 export class Indexer {
@@ -58,7 +59,7 @@ export class Indexer {
       cwd: rootPath,
       ignore: ['node_modules/**', 'dist/**'],
       absolute: false,
-      withFileTypes: true,
+      withFileTypes: false,
     });
 
     const files: FileNode[] = [];
@@ -113,6 +114,7 @@ export class Indexer {
         fn.fileContent = content;
         const lineCount = fn.endLine - fn.startLine + 1;
         if (lineCount > this.config.index.blockSplitThreshold) {
+          allNodes.push(fn);
           const blocks = this.splitIntoBlocks(tree.rootNode, fn, content);
           allNodes.push(...blocks);
         } else {
@@ -158,6 +160,7 @@ export class Indexer {
         parentId: null,
         body,
         fileContent: content,
+        astNode: node,
       });
     }
 
@@ -172,7 +175,7 @@ export class Indexer {
     content: string,
   ): RawNode[] {
     const blocks: RawNode[] = [];
-    const bodyNode = this.getBodyNode(root, fn.name ?? '');
+    const bodyNode = fn.astNode?.childForFieldName('body') ?? null;
 
     if (!bodyNode) {
       // Can't split — return whole function as one block
@@ -238,31 +241,12 @@ export class Indexer {
     return blocks;
   }
 
-  private getBodyNode(root: Parser.SyntaxNode, fnName: string): Parser.SyntaxNode | null {
-    const namedTypes = ['function_declaration', 'method_definition', 'arrow_function', 'function_expression'];
-    const queue = [root];
-    while (queue.length > 0) {
-      const node = queue.shift()!;
-      if (namedTypes.includes(node.type)) {
-        const body = node.childForFieldName?.('body') ?? null;
-        if (body && body.type === 'statement_block') {
-          return body;
-        }
-      }
-      for (let i = 0; i < node.namedChildCount; i++) {
-        queue.push(node.namedChild(i)!);
-      }
-    }
-    return null;
-  }
-
   private buildEdges(
     rootPath: string,
     nodes: RawNode[],
     files: FileNode[],
   ): GraphEdge[] {
     const edges: GraphEdge[] = [];
-    const nodeMap = new Map<string, RawNode>(nodes.map((n) => [n.id, n]));
 
     // For each function node, use tree-sitter to find call expressions
     // and map called function names back to node IDs
@@ -280,7 +264,7 @@ export class Indexer {
 
       const tree = parser.parse(content);
       // Find all call_expression nodes
-      this.walkForCalls(tree.rootNode, content, file.path, nodes, nodeMap, edges);
+      this.walkForCalls(tree.rootNode, content, file.path, nodes, edges);
     }
 
     return edges;
@@ -291,7 +275,6 @@ export class Indexer {
     content: string,
     filePath: string,
     allNodes: RawNode[],
-    nodeMap: Map<string, RawNode>,
     out: GraphEdge[],
   ): void {
     if (node.type === 'call_expression') {
@@ -323,7 +306,7 @@ export class Indexer {
     }
 
     for (let i = 0; i < node.namedChildCount; i++) {
-      this.walkForCalls(node.namedChild(i)!, content, filePath, allNodes, nodeMap, out);
+      this.walkForCalls(node.namedChild(i)!, content, filePath, allNodes, out);
     }
   }
 
