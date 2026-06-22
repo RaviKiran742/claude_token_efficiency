@@ -1,7 +1,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, statSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // Stateful in-memory mock for better-sqlite3
@@ -226,5 +226,77 @@ describe('Store', () => {
     const files = store.getFiles();
     expect(files).toHaveLength(1);
     expect(files[0].mtime).toBe(2000);
+  });
+
+  // -----------------------------------------------------------------------
+  // Fix 1: hasStaleFiles tests
+  // -----------------------------------------------------------------------
+
+  it('detects stale files when mtime has changed', () => {
+    const tmp = join(tmpdir(), 'cc-opts-stale-' + Math.random().toString(36).slice(2));
+    mkdirSync(tmp, { recursive: true });
+    const srcDir = join(tmp, 'src');
+    mkdirSync(srcDir, { recursive: true });
+    const filePath = join(srcDir, 'auth.ts');
+    writeFileSync(filePath, 'function login() {}');
+    const realMtime = statSync(filePath).mtimeMs;
+
+    // Write file record with an older mtime to simulate staleness
+    store.writeFiles([{
+      id: 'f1', path: 'src/auth.ts', mtime: realMtime - 10000, astHash: 'abc',
+    }]);
+
+    // The file on disk has mtime > stored mtime → stale
+    const result = store.hasStaleFiles(tmp);
+    expect(result).toBe(true);
+
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('reports no staleness when all files are up to date', () => {
+    const tmp = join(tmpdir(), 'cc-opts-stale-' + Math.random().toString(36).slice(2));
+    mkdirSync(tmp, { recursive: true });
+    const srcDir = join(tmp, 'src');
+    mkdirSync(srcDir, { recursive: true });
+    const filePath = join(srcDir, 'auth.ts');
+    writeFileSync(filePath, 'function login() {}');
+    const realMtime = statSync(filePath).mtimeMs;
+
+    // Write file record with a newer mtime → not stale
+    store.writeFiles([{
+      id: 'f1', path: 'src/auth.ts', mtime: realMtime + 10000, astHash: 'abc',
+    }]);
+
+    const result = store.hasStaleFiles(tmp);
+    expect(result).toBe(false);
+
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // -----------------------------------------------------------------------
+  // Fix 2: searchVectors edge case tests
+  // -----------------------------------------------------------------------
+
+  it('searchVectors returns empty when no vectors stored', () => {
+    const results = store.searchVectors([1, 0, 0], 5);
+    expect(results).toEqual([]);
+  });
+
+  it('searchVectors handles zero query vector', () => {
+    store.writeVectors(new Map([
+      ['n1', [1, 0, 0]],
+    ]));
+    const results = store.searchVectors([0, 0, 0], 5);
+    expect(results).toHaveLength(1);
+    expect(results[0].score).toBe(0);
+  });
+
+  it('searchVectors returns fewer results when k > available', () => {
+    store.writeVectors(new Map([
+      ['n1', [1, 0, 0]],
+      ['n2', [0, 1, 0]],
+    ]));
+    const results = store.searchVectors([1, 0, 0], 10);
+    expect(results).toHaveLength(2);
   });
 });
