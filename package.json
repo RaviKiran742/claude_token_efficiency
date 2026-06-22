@@ -1,0 +1,14 @@
+{
+  "name": "context-optimizer",
+  "private": true,
+  "workspaces": [
+    "packages/core",
+    "packages/cli",
+    "packages/mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  }
+}
