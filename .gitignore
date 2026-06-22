@@ -2,4 +2,3 @@ node_modules/
 dist/
 .context-optimizer/
 *.tsbuildinfo
-.claude/
