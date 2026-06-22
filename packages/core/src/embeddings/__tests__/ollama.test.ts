@@ -1,7 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterAll } from 'vitest';
 import { OllamaEmbeddingAdapter } from '../ollama.js';
 
 describe('OllamaEmbeddingAdapter', () => {
+  afterAll(() => {
+    vi.unstubAllGlobals();
+  });
   it('returns correct dimension', () => {
     const adapter = OllamaEmbeddingAdapter();
     expect(adapter.dimension()).toBe(768);
