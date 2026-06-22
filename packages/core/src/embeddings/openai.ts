@@ -11,7 +11,12 @@ export function OpenAIEmbeddingAdapter(
   apiKey: string,
   model = 'text-embedding-3-small'
 ): EmbeddingAdapter {
-  const dimension = model === 'text-embedding-3-small' ? 1536 : 1536; // 1536 for text-embedding-3-small
+  const MODEL_DIMENSIONS: Record<string, number> = {
+    'text-embedding-3-small': 1536,
+    'text-embedding-3-large': 3072,
+    'text-embedding-ada-002': 1536,
+  };
+  const dimension = MODEL_DIMENSIONS[model] ?? 1536;
 
   return {
     dimension: () => dimension,

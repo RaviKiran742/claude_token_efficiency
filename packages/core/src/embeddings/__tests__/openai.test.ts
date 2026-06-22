@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import { OpenAIEmbeddingAdapter } from '../openai.js';
 
 describe('OpenAIEmbeddingAdapter', () => {
@@ -47,5 +47,35 @@ describe('OpenAIEmbeddingAdapter', () => {
     const adapter = OpenAIEmbeddingAdapter('sk-test');
     const results = await adapter.embed([]);
     expect(results).toEqual([]);
+  });
+
+  it('splits large inputs into batches', async () => {
+    const callCount = { count: 0 };
+    const mockFetch = vi.fn().mockImplementation(() => {
+      callCount.count++;
+      // Return N items per batch
+      const requestBody = JSON.parse(mockFetch.mock.calls[callCount.count - 1][1].body);
+      const batchSize = requestBody.input.length;
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          data: Array.from({ length: batchSize }, (_, i) => ({ embedding: [0.1], index: i })),
+        }),
+      });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const adapter = OpenAIEmbeddingAdapter('sk-test');
+    const inputs = new Array(250).fill('test input');
+    const results = await adapter.embed(inputs);
+
+    expect(results).toHaveLength(250);
+    expect(callCount.count).toBe(3); // 100 + 100 + 50
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    vi.unstubAllGlobals(); // clean up
+  });
+
+  afterAll(() => {
+    vi.unstubAllGlobals();
   });
 });
