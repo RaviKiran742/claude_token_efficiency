@@ -11,6 +11,30 @@ const BATCH_SIZE = 50;
 /** Maximum texts per embedding API call. */
 const EMBED_BATCH_SIZE = 100;
 
+/** OpenAI embedding models have a hard 8192-token input limit.
+ *  We conservatively estimate 1 token ≈ 4 characters for code,
+ *  which gives ~32768 chars. Using 30000 as a safe margin. */
+const MAX_EMBEDDING_CHARS = 30000;
+
+/**
+ * Truncate embedding input text to fit within the model's token limit.
+ * Preserves the function-name prefix and keeps a meaningful suffix.
+ */
+function truncateEmbeddingText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+
+  // Try to find the colon separator (from "name: body" format)
+  const colonIdx = text.indexOf(':');
+  const prefix = colonIdx > 0 ? text.slice(0, colonIdx + 2) : '';
+  const bodyStart = colonIdx > 0 ? colonIdx + 2 : 0;
+  const availableForBody = maxChars - prefix.length - 20; // 20 chars for truncation marker
+
+  const head = text.slice(bodyStart, bodyStart + Math.floor(availableForBody * 0.7));
+  const tail = text.slice(-Math.floor(availableForBody * 0.3));
+
+  return prefix + head + '\n// ... [truncated] ...\n' + tail;
+}
+
 export async function buildIndex(
   rootPath: string,
   store: Store,
@@ -48,9 +72,16 @@ export async function buildIndex(
     totalNodes += batchNodes.length;
 
     // Embed nodes in sub-batches (API max inputs = 100)
-    const texts = batchNodes.map((n) =>
-      n.name ? `${n.name}: ${n.body}` : n.body,
-    );
+    // Truncate any single node that exceeds the model's token limit
+    const texts = batchNodes.map((n) => {
+      const raw = n.name ? `${n.name}: ${n.body}` : n.body;
+      if (raw.length > MAX_EMBEDDING_CHARS) {
+        const truncated = truncateEmbeddingText(raw, MAX_EMBEDDING_CHARS);
+        console.warn(`  ⚠  Truncated oversized node: ${n.id} (${raw.length} → ${truncated.length} chars, ~${Math.round(raw.length / 4)} tokens)`);
+        return truncated;
+      }
+      return raw;
+    });
 
     for (let e = 0; e < texts.length; e += EMBED_BATCH_SIZE) {
       const textBatch = texts.slice(e, e + EMBED_BATCH_SIZE);
