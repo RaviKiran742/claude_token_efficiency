@@ -25,7 +25,7 @@ interface RawNode {
   name: string | null;
   parentId: string | null;
   body: string;
-  fileContent: string; // for ts-morph call resolution
+  fileContent: string;
   astNode?: Parser.SyntaxNode;
 }
 
@@ -36,25 +36,10 @@ export class Indexer {
     this.config = config;
   }
 
-  build(rootPath: string): { files: FileNode[]; nodes: CodeNode[]; edges: GraphEdge[] } {
-    const files = this.walkFiles(rootPath);
-    const rawNodes = this.parseFiles(rootPath, files);
-    const edges = this.buildEdges(rootPath, rawNodes, files);
-    const nodes: CodeNode[] = rawNodes.map((n) => ({
-      id: n.id,
-      type: n.type,
-      fileId: n.fileId,
-      startLine: n.startLine,
-      endLine: n.endLine,
-      name: n.name,
-      parentId: n.parentId,
-      body: n.body,
-    }));
+  // ── public API ──────────────────────────────────────────────
 
-    return { files, nodes, edges };
-  }
-
-  private walkFiles(rootPath: string): FileNode[] {
+  /** Walk the repo and return FileNode entries (lightweight — paths + hashes only). */
+  walkFiles(rootPath: string): FileNode[] {
     const entries = fg.globSync('**/*.{ts,tsx,js,jsx,cts,mts}', {
       cwd: rootPath,
       ignore: ['node_modules/**', 'dist/**'],
@@ -84,6 +69,82 @@ export class Indexer {
     return files;
   }
 
+  /**
+   * Parse a single file, returning its CodeNode entries.
+   * Does NOT build cross-file edges — call buildEdgesForFile separately.
+   */
+  parseFile(rootPath: string, file: FileNode): CodeNode[] {
+    const parser = new Parser();
+    parser.setLanguage(TypeScript.tsx as Parser.Language);
+
+    const absPath = resolve(rootPath, file.path);
+    let content: string;
+    try {
+      content = readFileSync(absPath, 'utf-8');
+    } catch {
+      return [];
+    }
+
+    const tree = parser.parse(content);
+    const rawNodes = this.extractFunctions(tree.rootNode, content, file);
+    const nodes: CodeNode[] = [];
+
+    for (const fn of rawNodes) {
+      fn.fileContent = content;
+      const lineCount = fn.endLine - fn.startLine + 1;
+      if (lineCount > this.config.index.blockSplitThreshold) {
+        nodes.push(this.toCodeNode(fn));
+        const blocks = this.splitIntoBlocks(fn, content);
+        nodes.push(...blocks.map((b) => this.toCodeNode(b)));
+      } else {
+        nodes.push(this.toCodeNode(fn));
+      }
+    }
+
+    return nodes;
+  }
+
+  /**
+   * Parse a file and build cross-file call-graph edges using a global
+   * name→node-id lookup map keyed by function name.
+   */
+  buildEdgesForFile(
+    rootPath: string,
+    file: FileNode,
+    nodeNameMap: Map<string, string[]>,
+  ): GraphEdge[] {
+    const parser = new Parser();
+    parser.setLanguage(TypeScript.tsx as Parser.Language);
+
+    const absPath = resolve(rootPath, file.path);
+    let content: string;
+    try {
+      content = readFileSync(absPath, 'utf-8');
+    } catch {
+      return [];
+    }
+
+    const tree = parser.parse(content);
+    const edges: GraphEdge[] = [];
+    this.walkForCalls(tree.rootNode, content, file.path, nodeNameMap, edges);
+    return edges;
+  }
+
+  // ── private helpers ─────────────────────────────────────────
+
+  private toCodeNode(raw: RawNode): CodeNode {
+    return {
+      id: raw.id,
+      type: raw.type,
+      fileId: raw.fileId,
+      startLine: raw.startLine,
+      endLine: raw.endLine,
+      name: raw.name,
+      parentId: raw.parentId,
+      body: raw.body,
+    };
+  }
+
   private shouldIgnore(relPath: string): boolean {
     for (const pattern of this.config.index.ignore) {
       if (minimatch(relPath, pattern, { matchBase: true })) return true;
@@ -91,41 +152,13 @@ export class Indexer {
     return false;
   }
 
-  private parseFiles(rootPath: string, files: FileNode[]): RawNode[] {
-    const parser = new Parser();
-    parser.setLanguage(TypeScript.tsx as Parser.Language);
+  // ── AST extraction ──────────────────────────────────────────
 
-    const allNodes: RawNode[] = [];
-
-    for (const file of files) {
-      const absPath = resolve(rootPath, file.path);
-      let content: string;
-      try {
-        content = readFileSync(absPath, 'utf-8');
-      } catch {
-        continue;
-      }
-
-      const tree = parser.parse(content);
-      const functions = this.extractFunctions(tree.rootNode, content, file);
-
-      for (const fn of functions) {
-        fn.fileContent = content;
-        const lineCount = fn.endLine - fn.startLine + 1;
-        if (lineCount > this.config.index.blockSplitThreshold) {
-          allNodes.push(fn);
-          const blocks = this.splitIntoBlocks(tree.rootNode, fn, content);
-          allNodes.push(...blocks);
-        } else {
-          allNodes.push(fn);
-        }
-      }
-    }
-
-    return allNodes;
-  }
-
-  private extractFunctions(root: Parser.SyntaxNode, content: string, file: FileNode): RawNode[] {
+  private extractFunctions(
+    root: Parser.SyntaxNode,
+    content: string,
+    file: FileNode,
+  ): RawNode[] {
     const nodes: RawNode[] = [];
     this.walkForFunctions(root, content, file, nodes);
     return nodes;
@@ -137,7 +170,10 @@ export class Indexer {
     file: FileNode,
     out: RawNode[],
   ): void {
-    const namedTypes = ['function_declaration', 'method_definition', 'arrow_function', 'function_expression'];
+    const namedTypes = [
+      'function_declaration', 'method_definition',
+      'arrow_function', 'function_expression',
+    ];
     if (namedTypes.includes(node.type)) {
       const nameNode = node.childForFieldName?.('name') ?? node.namedChild(0);
       let name: string | null = null;
@@ -168,30 +204,26 @@ export class Indexer {
     }
   }
 
-  private splitIntoBlocks(
-    root: Parser.SyntaxNode,
-    fn: RawNode,
-    content: string,
-  ): RawNode[] {
+  // ── block splitting ─────────────────────────────────────────
+
+  private splitIntoBlocks(fn: RawNode, content: string): RawNode[] {
     const blocks: RawNode[] = [];
     const bodyNode = fn.astNode?.childForFieldName('body') ?? null;
 
     if (!bodyNode) {
-      // Can't split — return whole function as one block
       blocks.push({ ...fn, type: 'block', parentId: fn.id });
       return blocks;
     }
 
-    // Extract variable declarations from the function scope (outside blocks)
     const varDecls: string[] = [];
     const children = bodyNode.namedChildren;
     let blockIndex = 0;
-    let currentStart = -1;
-    let currentBody = '';
 
     for (const child of children) {
-      const blockTypes = ['if_statement', 'for_statement', 'for_in_statement',
-        'while_statement', 'try_statement', 'switch_statement'];
+      const blockTypes = [
+        'if_statement', 'for_statement', 'for_in_statement',
+        'while_statement', 'try_statement', 'switch_statement',
+      ];
 
       if (child.type === 'lexical_declaration' || child.type === 'variable_declaration') {
         varDecls.push(content.slice(child.startIndex, child.endIndex));
@@ -205,14 +237,6 @@ export class Indexer {
         const childEnd = child.endPosition.row + 1;
         const childBody = content.slice(child.startIndex, child.endIndex);
 
-        if (currentStart === -1) {
-          currentStart = childStart;
-          currentBody = childBody;
-        } else {
-          currentBody += '\n' + childBody;
-        }
-        currentStart = Math.min(currentStart, childStart);
-
         blockIndex++;
         const blockId = `${fn.id}::${blockIndex}`;
         const prefix = varDecls.length > 0 ? varDecls.join('\n') + '\n\n' : '';
@@ -221,15 +245,13 @@ export class Indexer {
           type: 'block',
           fileId: fn.fileId,
           filePath: fn.filePath,
-          startLine: currentStart,
+          startLine: childStart,
           endLine: childEnd,
           name: null,
           parentId: fn.id,
           body: prefix + childBody,
           fileContent: content,
         });
-        currentStart = -1;
-        currentBody = '';
       }
     }
 
@@ -240,64 +262,27 @@ export class Indexer {
     return blocks;
   }
 
-  private buildEdges(
-    rootPath: string,
-    nodes: RawNode[],
-    files: FileNode[],
-  ): GraphEdge[] {
-    const edges: GraphEdge[] = [];
-
-    // For each function node, use tree-sitter to find call expressions
-    // and map called function names back to node IDs
-    const parser = new Parser();
-    parser.setLanguage(TypeScript.tsx as Parser.Language);
-
-    for (const file of files) {
-      const absPath = resolve(rootPath, file.path);
-      let content: string;
-      try {
-        content = readFileSync(absPath, 'utf-8');
-      } catch {
-        continue;
-      }
-
-      const tree = parser.parse(content);
-      // Find all call_expression nodes
-      this.walkForCalls(tree.rootNode, content, file.path, nodes, edges);
-    }
-
-    return edges;
-  }
+  // ── edge building ───────────────────────────────────────────
 
   private walkForCalls(
     node: Parser.SyntaxNode,
     content: string,
     filePath: string,
-    allNodes: RawNode[],
+    nodeNameMap: Map<string, string[]>,
     out: GraphEdge[],
   ): void {
     if (node.type === 'call_expression') {
       const fnNode = node.namedChild(0);
       if (fnNode) {
         const calledName = content.slice(fnNode.startIndex, fnNode.endIndex);
-        // Find target node by name match
-        for (const target of allNodes) {
-          if (target.name === calledName && target.type === 'function') {
-            // Find enclosing function for the call site
-            const caller = this.findEnclosingFunction(node, content, filePath, allNodes);
-            if (caller) {
-              out.push({
-                source: caller.id,
-                target: target.id,
-                type: 'calls',
-                weight: 1.0,
-              });
-              out.push({
-                source: target.id,
-                target: caller.id,
-                type: 'called_by',
-                weight: 0.8,
-              });
+        // O(1) name lookup instead of O(n) scan
+        const targetIds = nodeNameMap.get(calledName);
+        if (targetIds) {
+          const callerId = this.findEnclosingFunctionId(node, content, filePath);
+          if (callerId) {
+            for (const targetId of targetIds) {
+              out.push({ source: callerId, target: targetId, type: 'calls', weight: 1.0 });
+              out.push({ source: targetId, target: callerId, type: 'called_by', weight: 0.8 });
             }
           }
         }
@@ -305,28 +290,28 @@ export class Indexer {
     }
 
     for (let i = 0; i < node.namedChildCount; i++) {
-      this.walkForCalls(node.namedChild(i)!, content, filePath, allNodes, out);
+      this.walkForCalls(node.namedChild(i)!, content, filePath, nodeNameMap, out);
     }
   }
 
-  private findEnclosingFunction(
+  private findEnclosingFunctionId(
     callNode: Parser.SyntaxNode,
     content: string,
     filePath: string,
-    allNodes: RawNode[],
-  ): RawNode | null {
-    // Walk up the tree to find the enclosing function node
+  ): string | null {
     let current = callNode.parent;
     while (current) {
-      const fnTypes = ['function_declaration', 'method_definition', 'arrow_function', 'function_expression'];
+      const fnTypes = [
+        'function_declaration', 'method_definition',
+        'arrow_function', 'function_expression',
+      ];
       if (fnTypes.includes(current.type)) {
         const nameNode = current.childForFieldName?.('name') ?? current.namedChild(0);
         let name: string | null = null;
         if (nameNode && nameNode.type === 'identifier') {
           name = content.slice(nameNode.startIndex, nameNode.endIndex);
         }
-        const fnId = `${filePath}::${name ?? 'anonymous'}`;
-        return allNodes.find((n) => n.id === fnId) ?? null;
+        return `${filePath}::${name ?? 'anonymous'}`;
       }
       current = current.parent;
     }

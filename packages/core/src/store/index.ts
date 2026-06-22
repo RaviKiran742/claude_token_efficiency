@@ -155,6 +155,24 @@ export class Store {
     }
   }
 
+  /** Load all vectors for graph diffusion. */
+  getAllVectors(): Map<string, number[]> {
+    const rows = this.db.prepare(
+      `SELECT node_id, embedding FROM vectors`
+    ).all() as unknown as { node_id: string; embedding: Buffer }[];
+    const result = new Map<string, number[]>();
+    for (const row of rows) {
+      const buf = Buffer.isBuffer(row.embedding) ? row.embedding : Buffer.from(row.embedding);
+      const vecLen = buf.length / 4;
+      const emb = new Array(vecLen);
+      for (let i = 0; i < vecLen; i++) {
+        emb[i] = buf.readFloatLE(i * 4);
+      }
+      result.set(row.node_id, emb);
+    }
+    return result;
+  }
+
   /** Cosine similarity search — JS implementation since we store vectors as BLOB. */
   searchVectors(queryVec: number[], k: number): Array<{ nodeId: string; score: number }> {
     const rows = this.db.prepare(
