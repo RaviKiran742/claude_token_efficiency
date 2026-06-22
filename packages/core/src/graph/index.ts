@@ -32,7 +32,7 @@ export class Graph {
   }
 
   getEmbeddings(): Map<string, number[]> {
-    return this.embeddings;
+    return new Map(this.embeddings);
   }
 
   setEmbeddings(embeddings: Map<string, number[]>): void {
@@ -94,7 +94,7 @@ export function buildGraph(
  */
 export function diffuseEmbeddings(
   graph: Graph,
-  alpha: number,
+  alpha = 0.3,
 ): Map<string, number[]> {
   const original = graph.getEmbeddings();
   const result = new Map<string, number[]>();
