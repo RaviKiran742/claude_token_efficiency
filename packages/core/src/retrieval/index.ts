@@ -75,7 +75,9 @@ export class Retriever {
         }
       }
 
-      const finalScore = 0.6 * semantic + 0.4 * graphProximity;
+      const finalScore = cursorNodeId
+        ? 0.6 * semantic + 0.4 * graphProximity
+        : semantic;
       items.push({ node, score: finalScore });
     }
 

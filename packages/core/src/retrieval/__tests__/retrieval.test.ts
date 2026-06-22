@@ -231,9 +231,8 @@ describe('Retriever', () => {
     const results = await retriever.query('small', { tokens: 100 });
     // big node is ~1000 estimated tokens, so it won't fit even if ranked high;
     // small node is ~10 estimated tokens and will fit
-    if (results.length > 0) {
-      expect(results.every((r) => r.name === 'small')).toBe(true);
-    }
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.every((r) => r.name === 'small')).toBe(true);
   });
 
   it('ranks results by score in descending order', async () => {
